@@ -10,7 +10,7 @@ from reranker import RerankedRetriever
 
 load_dotenv()
 
-LLM_MODEL = "openai/gpt-oss-120b"
+LLM_MODEL = "qwen/qwen3.8-27b"
 
 SYSTEM_PROMPT = """You are a research assistant answering questions using ONLY the provided context passages from academic papers.
 
@@ -18,6 +18,8 @@ Rules:
 - Answer using ONLY information found in the context below. Do not use outside knowledge.
 - If the context does not contain enough information to answer, say so explicitly instead of guessing.
 - When you state a fact, reference which source it came from using [1], [2], etc., matching the numbered context passages.
+- Lead with the direct answer to the question in your first sentence. Do not restate or rephrase the question before answering.
+- Include only details that directly support answering the question asked -- omit tangential facts from the context even if they're interesting.
 - Be concise and precise."""
 
 
@@ -34,15 +36,16 @@ def generate_answer(query: str, chunks: list[dict], client: Groq = None) -> str:
     context = format_context(chunks)
 
     user_prompt = f"""Context passages:
-{context}
+    {context}
 
-Question: {query}
+    Question: {query}
 
-Answer using only the context above, citing sources like [1], [2] as you go."""
+    Answer using only the context above, citing sources like [1], [2] as you go."""
 
     response = client.chat.completions.create(
         model=LLM_MODEL,
         temperature=0,  # deterministic, conservative -- we want grounded answers, not creative ones
+        max_tokens=700,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},

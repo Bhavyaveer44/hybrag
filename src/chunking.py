@@ -1,7 +1,6 @@
 """
 Splits documents into retrieval-sized chunks,measuring size in tokens
 
-
 recursive separator strategy (paragraph -> line -> sentence -> hard cut)
 """
 
@@ -10,8 +9,9 @@ from pathlib import Path
 from transformers import AutoTokenizer
 
 EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
-CHUNK_SIZE_TOKENS = 100     # tokens per chunk (short since abstracts are short)
-CHUNK_OVERLAP_TOKENS = 15   # tokens of overlap between adjacent chunks
+CHUNK_SIZE_TOKENS = 220    # covers most full abstracts as 1 chunk, avoids splitting dense,
+                           # multi-claim abstracts across chunks, which was hurting context recall
+CHUNK_OVERLAP_TOKENS = 20  # smaller overlap needed now as most chunks are the full abstract
 SEPARATORS = ["\n\n", "\n", ". ", " "]  # word-level fallback handles the rest
 
 RAW_PATH = Path(__file__).parent.parent / "data" / "raw" / "arxiv_corpus.json"
@@ -22,12 +22,11 @@ _tokenizer = AutoTokenizer.from_pretrained(EMBEDDING_MODEL_NAME)
 
 
 def token_len(text: str) -> int:
-    #Number of tokens the embedding model's tokenizer produces for this text.
     return len(_tokenizer.encode(text, add_special_tokens=False))
 
 
-def recursive_split(text: str, chunk_size: int = CHUNK_SIZE_TOKENS,separators: list[str] = SEPARATORS) -> list[str]:
-    
+def recursive_split(text: str, chunk_size: int = CHUNK_SIZE_TOKENS,
+                     separators: list[str] = SEPARATORS) -> list[str]:
     if token_len(text) <= chunk_size:
         return [text] if text.strip() else []
 
@@ -72,7 +71,7 @@ def recursive_split(text: str, chunk_size: int = CHUNK_SIZE_TOKENS,separators: l
 def add_overlap(chunks: list[str], overlap_tokens: int = CHUNK_OVERLAP_TOKENS) -> list[str]:
     """
     Prepends the last `overlap_tokens` tokens of the previous chunk
-    onto each chunk, decoded back to text -- so the overlap always
+    onto each chunk, decoded back to text so the overlap always
     lands on whole tokens, never mid-word.
     """
     if not chunks:
