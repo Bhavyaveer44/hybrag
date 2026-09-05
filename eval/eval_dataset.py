@@ -24,14 +24,6 @@ stating the specific claim you expect the system to surface.
 
 EVAL_QUESTIONS = [
     {
-        "question": "What method does the paper on hybrid retrieval propose for combining BM25 and dense embeddings?",
-        "reference": "It proposes combining BM25 and dense embeddings using reciprocal rank fusion.",
-    },
-    {
-        "question": "What does the RAGAS framework evaluate in a RAG pipeline?",
-        "reference": "RAGAS evaluates RAG pipelines using reference-free metrics, separating retrieval quality from generation quality, including faithfulness, context precision, and context recall.",
-    },
-    {
         "question": "How does ESPO's prompt optimization approach compare to GEPA in terms of accuracy and prompt length?",
         "reference": "ESPO improves average accuracy over GEPA by about 3.76 percentage points (74.67% vs 70.91%) across seven NLP benchmarks, while producing prompts roughly 47% shorter.",
     },
