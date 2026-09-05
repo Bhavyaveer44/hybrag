@@ -1,24 +1,23 @@
 """
-run_ragas.py
 Runs the full RAG pipeline (retrieve -> rerank -> generate) for each
 question in eval_dataset.py, then scores each result with RAGAS's
 four core metrics:
 
-  - Faithfulness (reference-free): does every claim in the answer
-    actually trace back to the retrieved context?
-  - Answer Relevancy (reference-free): does the answer actually
-    address the question asked?
-  - Context Precision (needs reference): of what we retrieved, how much
-    was actually necessary/relevant?
-  - Context Recall (needs reference): of what we NEEDED to answer,
-    how much did we actually retrieve?
+- Faithfulness (reference-free): does every claim in the answer
+actually trace back to the retrieved context?
+- Answer Relevancy (reference-free): does the answer actually
+address the question asked?
+- Context Precision (needs reference): of what we retrieved, how much
+was actually necessary/relevant?
+- Context Recall (needs reference): of what we NEEDED to answer,
+how much did we actually retrieve?
 
 Note: reference-free metrics catch generation problems (hallucination,
 off-topic answers). Reference-based metrics catch retrieval problems
 (missing or noisy context).
 
 Implementation note: RAGAS's collection-style metrics are natively
-async -- faithfulness alone issues multiple LLM calls per question
+async, faithfulness alone issues multiple LLM calls per question
 (decompose answer into claims, then verify each claim against
 context), so async lets those run concurrently. We use AsyncOpenAI
 and await .ascore() directly rather than the sync .score() wrapper,
@@ -46,10 +45,26 @@ from eval_dataset import EVAL_QUESTIONS
 
 load_dotenv()
 
-# Checkpoint file: scored results are appended here as they complete, so a
-# crash (rate limit, network blip) never loses already-completed work --
-# rerunning the script picks up where it left off instead of starting over.
+# Two separate checkpoints,because these are 2 independent, independently rate-limited stages:
+#  1. PIPELINE_CHECKPOINT: retrieve+rerank+generate results (uses the generation model's quota, qwen/qwen3.8-27b)
+#  2. SCORING checkpoint: RAGAS judge scores (uses the judge model's quota, openai/gpt-oss-120b)
+# Without this split, every rerun regenerates ALL answers even for questions already scored
+# wasting generation-model quota and making judge-side debugging burn through both budgets at once.
+PIPELINE_CHECKPOINT_PATH = Path(__file__).parent / "pipeline_results_checkpoint.json"
 CHECKPOINT_PATH = Path(__file__).parent / "ragas_results_checkpoint.json"
+
+
+def load_pipeline_checkpoint() -> dict[str, dict]:
+    if PIPELINE_CHECKPOINT_PATH.exists():
+        with open(PIPELINE_CHECKPOINT_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return {r["question"]: r for r in data}
+    return {}
+
+
+def save_pipeline_checkpoint(results: list[dict]):
+    with open(PIPELINE_CHECKPOINT_PATH, "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=2)
 
 
 def load_checkpoint() -> dict[str, dict]:
@@ -65,13 +80,13 @@ def save_checkpoint(scored: list[dict]):
     with open(CHECKPOINT_PATH, "w", encoding="utf-8") as f:
         json.dump(scored, f, indent=2)
 
-# Groq exposes an OpenAI-compatible API, so we point the standard OpenAI SDK
-# at Groq's base_url -- this lets us reuse ragas's "openai" adapter path
-# directly instead of needing a Groq-specific integration.
-#
-# Judge model is chosen independently from the generation model (see
-# generate.py) because judge metrics need reliable structured/JSON output
-# (tool-calling compliance), not just good free-text generation quality.
+"""Groq exposes an OpenAI-compatible API, so we point the standard OpenAI SDK at Groq's base_url
+this lets us reuse ragas's "openai" adapter path directly instead of needing a Groq-specific integration.
+
+Judge model is chosen independently from the generation model (see
+generate.py) because judge metrics need reliable structured/JSON output
+(tool-calling compliance), not just good free-text generation quality."""
+
 GROQ_JUDGE_MODEL = "openai/gpt-oss-120b"
 
 
@@ -84,24 +99,41 @@ def build_judge_llm():
         GROQ_JUDGE_MODEL,
         provider="openai",
         client=client,
-        max_tokens=4096,  # faithfulness decomposes the answer into multiple claims -- give it room
+        max_tokens=1024,  # structured claim/verdict JSON doesn't need much -- conserves daily judge quota
     )
 
 
 def run_pipeline_on_eval_set(retriever: RerankedRetriever) -> list[dict]:
-    """Runs retrieve -> rerank -> generate for each eval question, collecting everything RAGAS needs."""
-    results = []
+    """
+    Runs retrieve -> rerank -> generate for each eval question.
+    Checkpointed independently from RAGAS scoring: if a question's
+    answer was already generated in a previous run, it is loaded
+    from disk instead of calling the generation LLM again.
+    """
+    already_generated = load_pipeline_checkpoint()
+    results = list(already_generated.values())
+    if already_generated:
+        print(f"Loaded {len(already_generated)} already-generated answer(s) from checkpoint.")
+
     for item in EVAL_QUESTIONS:
         question = item["question"]
+        if question in already_generated:
+            continue  # skip -- don't burn generation-model quota re-answering this
+
+        print(f"Generating answer for: {question[:60]}...")
         chunks = retriever.retrieve(question, final_k=5)
         contexts = [c["text"] for c in chunks]
         answer = generate_answer(question, chunks)
-        results.append({
+
+        result = {
             "question": question,
             "reference": item["reference"],
             "contexts": contexts,
             "answer": answer,
-        })
+        }
+        results.append(result)
+        save_pipeline_checkpoint(results)  # persist immediately -- protects against a mid-loop failure too
+
     return results
 
 
@@ -115,10 +147,10 @@ async def score_with_ragas(results: list[dict]) -> list[dict]:
     context_recall = ContextRecall(llm=judge_llm)
 
     checkpointed = load_checkpoint()
-    # Only carry forward checkpoint entries for questions still present in
-    # EVAL_QUESTIONS -- if a question was removed or edited since the last
-    # run (e.g. a placeholder swapped for a real one), its stale checkpoint
-    # entry must not silently survive into the final averaged report.
+    """Only carry forward checkpoint entries for questions still present in
+    EVAL_QUESTIONS, if a question was removed or edited since the last
+    run (e.g. a placeholder swapped for a real one), its stale checkpoint
+    entry must not silently survive into the final averaged report."""
     current_questions = {r["question"] for r in results}
     already_scored = {q: v for q, v in checkpointed.items() if q in current_questions}
     scored = list(already_scored.values())
@@ -172,6 +204,11 @@ async def score_with_ragas(results: list[dict]) -> list[dict]:
 
 
 def print_report(scored: list[dict]):
+    if not scored:
+        print("\nNo questions were scored yet (likely hit a rate limit before the first completed).")
+        print("Rerun once quota resets -- checkpointing means nothing already-scored is lost.")
+        return
+
     metrics = ["faithfulness", "answer_relevancy", "context_precision", "context_recall"]
     print("\n" + "=" * 70)
     print("PER-QUESTION SCORES")
