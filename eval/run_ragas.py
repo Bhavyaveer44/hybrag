@@ -28,6 +28,7 @@ structured-output adapter RAGAS uses for judge calls.
 import json
 import os
 import sys
+import traceback
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -99,7 +100,7 @@ def build_judge_llm():
         GROQ_JUDGE_MODEL,
         provider="openai",
         client=client,
-        max_tokens=1024,  # structured claim/verdict JSON doesn't need much -- conserves daily judge quota
+        max_tokens=2048,  # leave room for faithfulness claim decomposition on multi-claim answers
     )
 
 
@@ -121,7 +122,7 @@ def run_pipeline_on_eval_set(retriever: RerankedRetriever) -> list[dict]:
             continue  # skip -- don't burn generation-model quota re-answering this
 
         print(f"Generating answer for: {question[:60]}...")
-        chunks = retriever.retrieve(question, final_k=5)
+        chunks = retriever.retrieve(question, final_k=5, expansion="neighbors")
         contexts = [c["text"] for c in chunks]
         answer = generate_answer(question, chunks)
 
@@ -163,16 +164,20 @@ async def score_with_ragas(results: list[dict]) -> list[dict]:
             continue
 
         print(f"\nScoring question {i}/{len(results)}...")
+        metric_name = "faithfulness"
         try:
             faith_score = await faithfulness.ascore(
                 user_input=r["question"], response=r["answer"], retrieved_contexts=r["contexts"],
             )
+            metric_name = "answer relevancy"
             relevancy_score = await answer_relevancy.ascore(
                 user_input=r["question"], response=r["answer"],
             )
+            metric_name = "context precision"
             precision_score = await context_precision.ascore(
                 user_input=r["question"], reference=r["reference"], retrieved_contexts=r["contexts"],
             )
+            metric_name = "context recall"
             recall_score = await context_recall.ascore(
                 user_input=r["question"], retrieved_contexts=r["contexts"], reference=r["reference"],
             )
@@ -182,6 +187,11 @@ async def score_with_ragas(results: list[dict]) -> list[dict]:
             print(f"Wait for the limit to reset, then rerun this script to resume from where it left off.")
             save_checkpoint(scored)
             return scored
+        except Exception as e:
+            print(f"\nScoring failed for question {i}/{len(results)} during {metric_name}: {type(e).__name__}: {e}")
+            print("This question was not checkpointed and will be retried on the next run.")
+            traceback.print_exc()
+            continue
 
         result = {
             **r,

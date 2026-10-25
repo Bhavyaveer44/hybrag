@@ -19,19 +19,23 @@ class HybridRAGPipeline:
     def __init__(self):
         self.retriever = RerankedRetriever()
 
-    def answer(self, query: str, shortlist_size: int = 20, final_k: int = 5) -> dict:
+    def answer(self, query: str, shortlist_size: int = 20, final_k: int = 5,
+               expansion: str = "neighbors", context_token_budget: int = 1200) -> dict:
         """
         Runs the full pipeline for one query. Returns the answer plus
         the sources actually used, so a caller can display citations
         or log them for later evaluation.
         """
-        chunks = self.retriever.retrieve(query, shortlist_size=shortlist_size, final_k=final_k)
+        chunks = self.retriever.retrieve(query, shortlist_size=shortlist_size, final_k=final_k,
+                                         expansion=expansion, context_token_budget=context_token_budget)
         answer_text = generate_answer(query, chunks)
         return {
             "query": query,
             "answer": answer_text,
             "sources": [
-                {"title": c["title"], "url": c["url"], "rerank_score": c["rerank_score"]}
+                {"title": c["title"], "url": c["url"], "paper_id": c.get("paper_id"),
+                 "chunk_id": c.get("chunk_id"), "section": c.get("section"),
+                 "context_role": c.get("context_role"), "rerank_score": c.get("rerank_score")}
                 for c in chunks
             ],
         }
