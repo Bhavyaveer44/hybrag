@@ -70,6 +70,11 @@ class HybridRetriever:
             results.append(chunk)
         return results
 
+    def get_chunks(self, chunk_ids: list[str]) -> list[dict]:
+        """Resolve chunk IDs to metadata in corpus order, ignoring unknown IDs."""
+        wanted = set(chunk_ids)
+        return [dict(chunk) for chunk in self.id_map.values() if chunk.get("chunk_id") in wanted]
+
 
 if __name__ == "__main__":
     retriever = HybridRetriever()

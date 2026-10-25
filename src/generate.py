@@ -27,7 +27,9 @@ def format_context(chunks: list[dict]) -> str:
     """Numbers each chunk so the model (and RAGAS later) can trace claims back to a specific source."""
     lines = []
     for i, chunk in enumerate(chunks, start=1):
-        lines.append(f"[{i}] (Source: \"{chunk['title']}\")\n{chunk['text']}")
+        section = chunk.get("section")
+        heading = f"; Section: {section}" if section else ""
+        lines.append(f"[{i}] (Source: \"{chunk['title']}\"{heading})\n{chunk['text']}")
     return "\n\n".join(lines)
 
 

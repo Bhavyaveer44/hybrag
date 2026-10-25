@@ -26,7 +26,7 @@ Query
 
 | Stage | Choice | Why |
 |---|---|---|
-| Chunking | Token-based recursive splitter | Aligned to the embedding model's actual tokenizer — avoids mid-word cuts |
+| Chunking | Section-aware recursive splitter (or fixed recursive experiment via `--strategy fixed`) | Preserves paper/section/chunk identity and avoids mid-word cuts |
 | Embeddings | `sentence-transformers/all-MiniLM-L6-v2` | Free, local, no API dependency |
 | Vector index | FAISS `IndexFlatIP` (normalized) | Exact search — honest choice at this corpus scale, avoids ANN approximation error |
 | Keyword search | `rank_bm25` | Simple, in-memory, standard BM25 |
@@ -88,3 +88,9 @@ python src/indexing.py     # build BM25 + FAISS indexes
 python src/pipeline.py "your question here"   # ask it something
 python eval/run_ragas.py   # run the full RAGAS benchmark
 ```
+
+## Chunking and context experiments
+
+`python src/chunking.py --strategy section` uses headings/structured sections when available and falls back to the abstract for the current arXiv corpus. Compare it with `python src/chunking.py --strategy fixed`; both accept `--chunk-size` and `--overlap`. Rebuild indexes after changing chunking. Every chunk has stable paper, parent, section, and neighbor IDs. At query time the reranker selects focused chunks and expands adjacent chunks by default; callers can choose `none`, `parent`, `neighbors`, or `parent_and_neighbors` and set `context_token_budget` on `HybridRAGPipeline.answer` (default 1200 embedding-tokenizer tokens). Expansion deduplicates identical chunks and keeps focused hits first.
+
+For a clean benchmark on a new chunking/context configuration, delete `eval/pipeline_results_checkpoint.json` before running `python eval/run_ragas.py`; that file stores generated answers from earlier configurations. It is intentionally not tracked.
