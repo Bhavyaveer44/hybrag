@@ -18,7 +18,11 @@ Query
                         Cross-encoder reranker (ms-marco-MiniLM-L-6-v2)
                                         │
                                         ▼
-                              Top-5 chunks → Groq Llama 3.3 70B
+                    Focused chunks + neighbor expansion
+                       (1,200-token context budget)
+                                        │
+                                        ▼
+                              Groq Qwen 3.8 27B
                                         │
                                         ▼
                               Grounded, cited answer
@@ -32,7 +36,7 @@ Query
 | Keyword search | `rank_bm25` | Simple, in-memory, standard BM25 |
 | Fusion | Reciprocal Rank Fusion (k=60) | Scale-independent — sidesteps BM25/cosine score incomparability |
 | Reranker | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Joint query-document scoring, corrects first-stage retrieval mistakes |
-| Generation | Groq Llama 3.3 70B | Free tier, fast inference |
+| Generation | Groq `qwen/qwen3.8-27b` | Separate from the evaluation judge and configured for grounded answers |
 | Eval judge | `openai/gpt-oss-120b` (via Groq) | Chosen independently from the generation model for stronger structured-output/tool-calling compliance, which RAGAS's judge metrics depend on |
 
 ## Evaluation
@@ -41,14 +45,14 @@ Benchmarked with RAGAS across 12 hand-curated questions against a live ~200-pape
 
 | Metric | Score | What it measures |
 |---|---|---|
-| Faithfulness | 0.91 | Does every claim in the answer trace back to retrieved context? |
-| Context Precision | 0.87 | Of what was retrieved, how much was actually relevant? |
-| Context Recall | 0.86 | Of what was needed, how much did we retrieve? |
-| Answer Relevancy | 0.64 | Does the answer directly address the question asked? |
+| Faithfulness | 0.958 | Does every claim in the answer trace back to retrieved context? |
+| Answer Relevancy | 0.762 | Does the answer directly address the question asked? |
+| Context Precision | 0.906 | Of what was retrieved, how much was actually relevant? |
+| Context Recall | 1.000 | Of what was needed, how much did we retrieve? |
 
-**Key finding**: generation stayed well-grounded (high faithfulness) and retrieval found the right material (high precision/recall), but answer relevancy lagged — likely because the citation-heavy, caveat-including prompt style that maximizes faithfulness also produces longer, less tightly-scoped answers, which RAGAS's relevancy metric penalizes. This is a real, known tension between optimizing faithfulness and optimizing relevancy in RAG prompt design.
+These are the latest scores after section-aware chunk metadata, neighbor expansion, and a 1,200-token context budget were enabled; the pipeline and scoring checkpoints let the run resume without repeating completed API calls. Compare with earlier runs only when the corpus, generated answers, and evaluation setup are held constant.
 
-One question scored Context Precision 1.0 / Context Recall 0.0 simultaneously — retrieval found genuinely on-topic material, but a reference requiring several distinct numeric claims spread across a dense abstract wasn't fully covered by any single retrieved chunk. Points at a chunking granularity issue for claim-dense source text, not a retrieval relevance issue.
+**Current finding**: context recall reached 1.000 on this 12-question set, while answer relevancy at 0.762 remains the lowest metric. This suggests all reference information was present in retrieved context for these questions, but some generated answers could address the question more directly. Treat the scores as a small curated evaluation, not a general performance guarantee.
 
 ## Engineering notes worth knowing
 
@@ -60,7 +64,7 @@ One question scored Context Precision 1.0 / Context Recall 0.0 simultaneously �
 
 ```
 hybrid-rag-ragas/
-├── data/{raw,processed}/    # fetched corpus, chunks, built indexes
+├── data/{raw,processed}/    # fetched corpus, chunks, built indexes (generated; ignored by Git)
 ├── src/
 │   ├── ingest.py            # arXiv corpus fetching
 │   ├── chunking.py          # token-aware recursive splitting
@@ -78,19 +82,20 @@ hybrid-rag-ragas/
 ## Setup
 
 ```bash
-python -m venv venv && source venv/bin/activate  # Windows: venv\Scripts\activate
+python -m venv venv
+venv\Scripts\activate      # Windows Command Prompt; PowerShell: .\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 echo "GROQ_API_KEY=your_key_here" > .env
 
-python src/ingest.py       # fetch corpus
-python src/chunking.py     # chunk it
-python src/indexing.py     # build BM25 + FAISS indexes
-python src/pipeline.py "your question here"   # ask it something
-python eval/run_ragas.py   # run the full RAGAS benchmark
+python src\ingest.py       # fetch corpus
+python src\chunking.py     # chunk it
+python src\indexing.py     # build BM25 + FAISS indexes
+python src\pipeline.py "your question here"   # ask it something
+python eval\run_ragas.py   # run the full RAGAS benchmark
 ```
 
 ## Chunking and context experiments
 
-`python src/chunking.py --strategy section` uses headings/structured sections when available and falls back to the abstract for the current arXiv corpus. Compare it with `python src/chunking.py --strategy fixed`; both accept `--chunk-size` and `--overlap`. Rebuild indexes after changing chunking. Every chunk has stable paper, parent, section, and neighbor IDs. At query time the reranker selects focused chunks and expands adjacent chunks by default; callers can choose `none`, `parent`, `neighbors`, or `parent_and_neighbors` and set `context_token_budget` on `HybridRAGPipeline.answer` (default 1200 embedding-tokenizer tokens). Expansion deduplicates identical chunks and keeps focused hits first.
+`python src\chunking.py --strategy section` uses headings/structured sections when available and falls back to the abstract for the current arXiv corpus. Compare it with `python src\chunking.py --strategy fixed`; both accept `--chunk-size` and `--overlap`. Rebuild chunks and indexes after changing strategy or chunk parameters. Each chunk records stable paper, section, parent, and neighbor IDs. At query time the reranker selects focused chunks and expands adjacent chunks by default; callers can choose `none`, `parent`, `neighbors`, or `parent_and_neighbors` and set `context_token_budget` on `HybridRAGPipeline.answer` (default 1,200 embedding-tokenizer tokens). Expansion deduplicates identical text and prioritizes the focused hits within the budget.
 
-For a clean benchmark on a new chunking/context configuration, delete `eval/pipeline_results_checkpoint.json` before running `python eval/run_ragas.py`; that file stores generated answers from earlier configurations. It is intentionally not tracked.
+For a clean benchmark on a new chunking/context configuration, delete both `eval\pipeline_results_checkpoint.json` (generated answers) and `eval\ragas_results_checkpoint.json` (scores) before running `python eval\run_ragas.py`; otherwise prior answers or scores may be reused. These local result files are not tracked by Git. The scorer resumes completed questions after a rate limit; a non-rate-limit metric failure is reported and retried on the next run. HF Hub authentication is optional for model download rate limits.
